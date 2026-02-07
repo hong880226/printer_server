@@ -37,6 +37,9 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV DEBIAN_FRONTEND=noninteractive
 
+# 复制 requirements.txt 到运行阶段
+COPY --from=builder /tmp/requirements.txt /tmp/requirements.txt
+
 # 从构建阶段复制预编译的wheel
 COPY --from=builder /wheels /wheels
 RUN pip install --no-cache-dir --find-links=/wheels -r /tmp/requirements.txt && \
