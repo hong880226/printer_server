@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       platforms:
-        description: '选择构建架构（可多选）'
+        description: '选择构建架构'
         type: choice
         required: true
         default: 'arm64'
@@ -43,22 +43,18 @@ on:
         default: false
 
 env:
-  # 阿里云容器镜像服务配置
   REGISTRY: registry.cn-hangzhou.aliyuncs.com
   IMAGE_NAME: ${{ secrets.ALIYUN_REPOSITORY_NAME }}
-  # GitHub镜像仓库配置（作为备份）
   GHCR_REGISTRY: ghcr.io
   GITHUB_REPOSITORY: ${{ github.repository }}
 
 jobs:
-  # 任务1: 构建和测试
+  # 任务1: 构建镜像
   build:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.platforms.outputs.matrix }}
       platforms_list: ${{ steps.platforms.outputs.platforms_list }}
-      build_amd64: ${{ steps.platforms.outputs.build_amd64 }}
-      build_arm64: ${{ steps.platforms.outputs.build_arm64 }}
+      tag_name: ${{ steps.tag-output.outputs.tag_name }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -67,24 +63,18 @@ jobs:
         uses: docker/setup-buildx-action@v3
         id: buildx
 
-      - name: Extract metadata for Docker
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-            ${{ env.GHCR_REGISTRY }}/${{ env.GITHUB_REPOSITORY }}
-          tags: |
-            type=sha
-            type=ref,event=branch
-            type=raw,value=latest,enable=startsWith(github.ref, 'refs/heads/')
-            type=sha,prefix=
-            type=raw,value=${{ github.event.inputs.tag }},enable=github.event.inputs.tag != ''
+      - name: Determine tag name
+        id: tag-output
+        run: |
+          if [[ "${{ github.event.inputs.tag }}" != "" ]]; then
+            echo "tag_name=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag_name=sha-${{ github.sha }}" >> $GITHUB_OUTPUT
+          fi
 
-      - name: Determine target platforms
+      - name: Determine platforms
         id: platforms
         run: |
-          # 确定要构建的架构
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             PLATFORMS=${{ github.event.inputs.platforms }}
             if [[ "$PLATFORMS" == "all" ]]; then
@@ -97,31 +87,20 @@ jobs:
           else
             PLATFORMS="linux/amd64,linux/arm64"
           fi
-          
-          echo "PLATFORMS=$PLATFORMS"
           echo "platforms_list=$PLATFORMS" >> $GITHUB_OUTPUT
-          
-          # 输出是否构建各架构
-          if echo "$PLATFORMS" | grep -q "linux/amd64"; then
-            echo "build_amd64=true" >> $GITHUB_OUTPUT
-          else
-            echo "build_amd64=false" >> $GITHUB_OUTPUT
-          fi
-          
-          if echo "$PLATFORMS" | grep -q "linux/arm64"; then
-            echo "build_arm64=true" >> $GITHUB_OUTPUT
-          else
-            echo "build_arm64=false" >> $GITHUB_OUTPUT
-          fi
-          
-          # 输出JSON数组格式
-          if [[ "$PLATFORMS" == *"amd64"* && *"arm64"* ]]; then
-            echo "matrix=[\"linux/amd64\",\"linux/arm64\"]" >> $GITHUB_OUTPUT
-          elif [[ "$PLATFORMS" == *"amd64"* ]]; then
-            echo "matrix=[\"linux/amd64\"]" >> $GITHUB_OUTPUT
-          else
-            echo "matrix=[\"linux/arm64\"]" >> $GITHUB_OUTPUT
-          fi
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+            ${{ env.GHCR_REGISTRY }}/${{ env.GITHUB_REPOSITORY }}
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=raw,value=latest
+            type=raw,value=${{ steps.tag-output.outputs.tag_name }}
 
       - name: Build Docker images
         uses: docker/build-push-action@v6
@@ -136,24 +115,17 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAME }}
           build-args: |
             BUILD_DATE=${{ env.BUILD_DATE }}
-            VERSION=${{ github.event.inputs.tag || github.ref_name }}
+            VERSION=${{ steps.tag-output.outputs.tag_name }}
           file: Dockerfile
 
-      - name: Generate artifact manifest
+      - name: Build summary
         run: |
           echo "========================================"
           echo "  Build Summary"
           echo "========================================"
           echo "Platforms: ${{ steps.platforms.outputs.platforms_list }}"
-          echo "Image tags: ${{ steps.meta.outputs.tags }}"
+          echo "Tag: ${{ steps.tag-output.outputs.tag_name }}"
           echo "Event: ${{ github.event_name }}"
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "Manual trigger options:"
-            echo "  - Push to registry: ${{ github.event.inputs.push_registry }}"
-            echo "  - Generate offline: ${{ github.event.inputs.generate_offline }}"
-            echo "  - Custom tag: ${{ github.event.inputs.tag || '(none)' }}"
-            echo "  - Dry run: ${{ github.event.inputs.dry_run }}"
-          fi
           echo "========================================"
 
   # 任务2: 推送到阿里云容器镜像服务
@@ -189,9 +161,8 @@ jobs:
           tags: |
             type=sha
             type=ref,event=branch
-            type=raw,value=latest,enable=startsWith(github.ref, 'refs/heads/')
-            type=sha,prefix=
-            type=raw,value=${{ github.event.inputs.tag }},enable=github.event.inputs.tag != ''
+            type=raw,value=latest
+            type=raw,value=${{ needs.build.outputs.tag_name }}
 
       - name: Build and push to Aliyun
         uses: docker/build-push-action@v6
@@ -205,19 +176,15 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAME }}-aliyun
           build-args: |
             BUILD_DATE=${{ env.BUILD_DATE }}
-            VERSION=${{ github.event.inputs.tag || github.ref_name }}
+            VERSION=${{ needs.build.outputs.tag_name }}
           file: Dockerfile
 
       - name: Verify push
         run: |
-          echo "========================================"
-          echo "  Successfully pushed to Aliyun"
-          echo "========================================"
+          echo "Successfully pushed to Aliyun Container Registry"
           echo "Registry: ${{ env.REGISTRY }}"
           echo "Repository: ${{ env.IMAGE_NAME }}"
           echo "Tags: ${{ steps.meta.outputs.tags }}"
-          echo "Platforms: ${{ needs.build.outputs.platforms_list }}"
-          echo "========================================"
 
   # 任务3: 导出离线tar文件
   export-offline:
@@ -242,9 +209,9 @@ jobs:
           tags: |
             type=sha
             type=raw,value=latest
-            type=raw,value=${{ github.event.inputs.tag }},enable=github.event.inputs.tag != ''
+            type=raw,value=${{ needs.build.outputs.tag_name }}
 
-      - name: Build and export as tar (Multi-platform)
+      - name: Build and export as tar
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -255,7 +222,7 @@ jobs:
           output: type=docker,dest=./print-service.tar
           build-args: |
             BUILD_DATE=${{ env.BUILD_DATE }}
-            VERSION=${{ github.event.inputs.tag || github.ref_name }}
+            VERSION=${{ needs.build.outputs.tag_name }}
 
       - name: Determine artifact name
         id: artifact-name
@@ -272,39 +239,26 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.artifact-name.outputs.name }}-${{ github.sha }}
-          path: ./print-service*.tar
+          path: ./print-service.tar
           compression-level: 1
-
-      - name: Calculate file size
-        run: |
-          SIZE=$(du -h ./print-service*.tar | cut -f1 | head -1)
-          echo "========================================"
-          echo "  Offline Image Ready"
-          echo "========================================"
-          echo "Size: $SIZE"
-          echo "Platforms: ${{ needs.build.outputs.platforms_list }}"
-          echo "========================================"
 
       - name: Create checksums
         run: |
-          for tarfile in ./print-service*.tar; do
-            if [[ -f "$tarfile" ]]; then
-              sha256sum "$tarfile" > "${tarfile}.sha256"
-            fi
-          done
+          sha256sum ./print-service.tar > ./print-service.tar.sha256
+          cat ./print-service.tar.sha256
 
       - name: Upload checksums
         uses: actions/upload-artifact@v4
         with:
           name: print-service-checksums-${{ github.sha }}
-          path: ./print-service*.sha256
+          path: ./print-service.tar.sha256
 
   # 任务4: 创建版本发布
   create-release:
     needs: [push-to-aliyun, export-offline]
     if: >-
       startsWith(github.ref, 'refs/tags/') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '' && github.event.inputs.dry_run != true)
+      (github.event_name == 'workflow_dispatch' && needs.build.outputs.tag_name != '' && github.event.inputs.dry_run != true)
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -317,8 +271,8 @@ jobs:
       - name: Get version tag
         id: version
         run: |
-          if [[ "${{ github.event.inputs.tag }}" != "" ]]; then
-            VERSION="${{ github.event.inputs.tag }}"
+          if [[ "${{ needs.build.outputs.tag_name }}" != "" && "${{ needs.build.outputs.tag_name }}" != sha-${{ github.sha }}* ]]; then
+            VERSION="${{ needs.build.outputs.tag_name }}"
           else
             VERSION=${GITHUB_REF#refs/tags/}
           fi
@@ -368,11 +322,6 @@ jobs:
           echo "========================================"
           echo "  Manual Build Completed"
           echo "========================================"
-          echo ""
-          echo "Build Options:"
-          echo "  - Platforms: ${{ needs.build.outputs.platforms_list }}"
-          echo "  - Push to registry: ${{ github.event.inputs.push_registry }}"
-          echo "  - Generate offline: ${{ github.event.inputs.generate_offline }}"
-          echo "  - Custom tag: ${{ github.event.inputs.tag || '(none)' }}"
-          echo ""
+          echo "Platforms: ${{ needs.build.outputs.platforms_list }}"
+          echo "Tag: ${{ needs.build.outputs.tag_name }}"
           echo "========================================"
