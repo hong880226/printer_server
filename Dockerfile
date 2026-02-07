@@ -28,6 +28,7 @@ RUN apt-get update && apt-get install -y \
     libreoffice-writer \
     libreoffice-calc \
     libreoffice-impress \
+    libcups2-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # 安装Python依赖
