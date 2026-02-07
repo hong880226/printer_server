@@ -41,6 +41,8 @@ concurrency:
 
 env:
   REGISTRY: registry.cn-hangzhou.aliyuncs.com
+  # 阿里云命名空间 + 仓库名组合
+  IMAGE_NAMESPACE: ${{ secrets.ALIYUN_IMAGE_NAMESPACE }}
   # secrets 在 PR(fork) 场景可能为空，给个兜底
   IMAGE_NAME: ${{ secrets.ALIYUN_REPOSITORY_NAME || 'printer_server' }}
   GHCR_REGISTRY: ghcr.io
@@ -106,7 +108,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_NAME }}
             ${{ env.GHCR_REGISTRY }}/${{ env.GITHUB_REPOSITORY }}
           flavor: |
             latest=auto
@@ -125,8 +127,8 @@ jobs:
           push: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ env.IMAGE_NAME }}
-          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAME }}
+          cache-from: type=gha,scope=${{ env.IMAGE_NAMESPACE }}-${{ env.IMAGE_NAME }}
+          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAMESPACE }}-${{ env.IMAGE_NAME }}
           build-args: |
             BUILD_DATE=${{ steps.builddate.outputs.build_date }}
             VERSION=${{ steps.tag.outputs.tag_name }}
@@ -151,8 +153,9 @@ jobs:
       - name: Debug image name
         run: |
           echo "REGISTRY=${{ env.REGISTRY }}"
+          echo "NAMESPACE=${{ env.IMAGE_NAMESPACE }}"
           echo "IMAGE_NAME=${{ env.IMAGE_NAME }}"
-          echo "FULL=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"  
+          echo "FULL=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_NAME }}"  
 
       - name: Log in to Aliyun Container Registry
         uses: docker/login-action@v3
@@ -165,7 +168,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_NAME }}
           flavor: |
             latest=auto
           tags: |
@@ -183,8 +186,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ env.IMAGE_NAME }}-aliyun
-          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAME }}-aliyun
+          cache-from: type=gha,scope=${{ env.IMAGE_NAMESPACE }}-${{ env.IMAGE_NAME }}-aliyun
+          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAMESPACE }}-${{ env.IMAGE_NAME }}-aliyun
           build-args: |
             BUILD_DATE=${{ needs.build.outputs.build_date }}
             VERSION=${{ needs.build.outputs.tag_name }}
@@ -282,7 +285,7 @@ jobs:
             ## Printer Server ${{ steps.ver.outputs.version }}
 
             ### Docker Images
-            - Aliyun: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}`
+            - Aliyun: `${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}`
 
             ### Offline Packages
             - `print-service-amd64.tar` / `print-service-arm64.tar`

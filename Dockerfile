@@ -48,6 +48,8 @@ RUN pip install --no-cache-dir --no-index --find-links=/wheels -r /tmp/requireme
 WORKDIR /app
 COPY backend/ ./backend/
 COPY frontend/ ./frontend/
+# Flask默认在backend/templates/找模板，所以需要复制一份
+COPY frontend/templates/ ./backend/templates/
 COPY run.py .
 
 RUN mkdir -p /app/uploads /app/logs && chmod 777 /app/uploads /app/logs
