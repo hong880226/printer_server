@@ -1,47 +1,44 @@
-# 远程打印服务 - ARM64 专用 Dockerfile
+# 远程打印服务 - ARM64 专用 Dockerfile（精简版）
 # 用于无法使用 buildx 构建多架构镜像的环境
 # 直接在 ARM64 机器上构建
 
-# Python基础镜像 (ARM64)
-FROM python:3.11-slim-bookworm
+# ========== 构建阶段 ==========
+FROM python:3.11-slim-bookworm AS builder
 
-# 或者使用国内镜像源（适用于国内ARM服务器）
-# FROM mirror.gcr.io/library/python:3.11-slim-bookworm
-# FROM docker.mirrors.ustc.edu.cn/library/python:3.11-slim-bookworm
+# 安装编译工具
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libcups2-dev \
+    && rm -rf /var/lib/apt-lists/*
 
-# 维护者信息
-LABEL maintainer="Remote Print Service"
-LABEL description="Remote Print Service with CUPS integration for ARM64"
-LABEL architecture="arm64"
-LABEL os="linux"
+# 安装Python依赖（使用wheel加速后续构建）
+COPY requirements.txt /tmp/requirements.txt
+RUN pip wheel --no-cache-dir --wheel-dir /wheels -r /tmp/requirements.txt
+
+# ========== 运行阶段 ==========
+FROM python:3.11-slim-bookworm AS runner
+
+# 只安装运行时必需的最小系统依赖（移除libreoffice以减小体积）
+RUN apt-get update && apt-get install -y \
+    cups \
+    cups-client \
+    cups-filters \
+    ghostscript \
+    poppler-utils \
+    libmagic1 \
+    fonts-dejavu-core \
+    fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
 
 # 设置环境变量
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 安装系统依赖（ARM64）
-RUN apt-get update && apt-get install -y \
-    cups \
-    cups-client \
-    cups-filters \
-    hpijs-ppds \
-    hplip \
-    ghostscript \
-    poppler-utils \
-    libmagic1 \
-    fonts-dejavu-core \
-    fonts-liberation \
-    libreoffice \
-    libreoffice-writer \
-    libreoffice-calc \
-    libreoffice-impress \
-    libcups2-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# 安装Python依赖
-COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+# 从构建阶段复制预编译的wheel
+COPY --from=builder /wheels /wheels
+RUN pip install --no-cache-dir --find-links=/wheels -r /tmp/requirements.txt && \
+    rm -rf /wheels
 
 # 创建工作目录
 WORKDIR /app
@@ -61,9 +58,8 @@ EXPOSE 5000 631
 
 # 设置CUPS配置
 RUN echo "ServerName localhost" > /etc/cups/client.conf && \
-    echo "Listen 631" >> /etc/cups/cupsd.conf && \
-    sed -i 's/Listen localhost:631/Listen 631/g' /etc/cups/cupsd.conf && \
-    sed -i 's/BrowseAddress @LOCAL/BrowseAddress 127.0.0.1:631/g' /etc/cups/cupsd.conf
+    echo "Listen 631" > /etc/cups/cupsd.conf && \
+    sed -i 's/Listen localhost:631/Listen 631/g' /etc/cups/cupsd.conf
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \

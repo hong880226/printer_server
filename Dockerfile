@@ -1,39 +1,42 @@
-# 远程打印服务 - Docker配置
+# 远程打印服务 - Docker多阶段构建（精简版）
 
-# Python基础镜像
-FROM python:3.11-slim-bookworm
+# ========== 构建阶段 ==========
+FROM python:3.11-slim-bookworm AS builder
 
-# 维护者信息
-LABEL maintainer="Remote Print Service"
-LABEL description="Remote Print Service with CUPS integration"
+# 安装编译工具
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libcups2-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# 安装Python依赖（使用wheel加速后续构建）
+COPY requirements.txt /tmp/requirements.txt
+RUN pip wheel --no-cache-dir --wheel-dir /wheels -r /tmp/requirements.txt
+
+# ========== 运行阶段 ==========
+FROM python:3.11-slim-bookworm AS runner
+
+# 只安装运行时必需的最小系统依赖
+RUN apt-get update && apt-get install -y \
+    cups \
+    cups-client \
+    cups-filters \
+    ghostscript \
+    poppler-utils \
+    libmagic1 \
+    fonts-dejavu-core \
+    fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
 
 # 设置环境变量
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 安装系统依赖
-RUN apt-get update && apt-get install -y \
-    cups \
-    cups-client \
-    cups-filters \
-    hpijs-ppds \
-    hplip \
-    ghostscript \
-    poppler-utils \
-    libmagic1 \
-    fonts-dejavu-core \
-    fonts-liberation \
-    libreoffice \
-    libreoffice-writer \
-    libreoffice-calc \
-    libreoffice-impress \
-    libcups2-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# 安装Python依赖
-COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+# 从构建阶段复制预编译的wheel
+COPY --from=builder /wheels /wheels
+RUN pip install --no-cache-dir --find-links=/wheels -r /tmp/requirements.txt && \
+    rm -rf /wheels
 
 # 创建工作目录
 WORKDIR /app
@@ -53,9 +56,8 @@ EXPOSE 5000 631
 
 # 设置CUPS配置
 RUN echo "ServerName localhost" > /etc/cups/client.conf && \
-    echo "Listen 631" >> /etc/cups/cupsd.conf && \
-    sed -i 's/Listen localhost:631/Listen 631/g' /etc/cups/cupsd.conf && \
-    sed -i 's/BrowseAddress @LOCAL/BrowseAddress 127.0.0.1:631/g' /etc/cups/cupsd.conf
+    echo "Listen 631" > /etc/cups/cupsd.conf && \
+    sed -i 's/Listen localhost:631/Listen 631/g' /etc/cups/cupsd.conf
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
