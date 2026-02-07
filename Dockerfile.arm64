@@ -1,0 +1,84 @@
+# 远程打印服务 - ARM64 专用 Dockerfile
+# 用于无法使用 buildx 构建多架构镜像的环境
+# 直接在 ARM64 机器上构建
+
+# Python基础镜像 (ARM64)
+FROM python:3.11-slim-bookworm
+
+# 或者使用国内镜像源（适用于国内ARM服务器）
+# FROM mirror.gcr.io/library/python:3.11-slim-bookworm
+# FROM docker.mirrors.ustc.edu.cn/library/python:3.11-slim-bookworm
+
+# 维护者信息
+LABEL maintainer="Remote Print Service"
+LABEL description="Remote Print Service with CUPS integration for ARM64"
+LABEL architecture="arm64"
+LABEL os="linux"
+
+# 设置环境变量
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 安装系统依赖（ARM64）
+RUN apt-get update && apt-get install -y \
+    cups \
+    cups-client \
+    cups-filters \
+    hpijs-ppds \
+    hplip \
+    ghostscript \
+    poppler-utils \
+    libmagic1 \
+    fonts-dejavu-core \
+    fonts-liberation \
+    libreoffice \
+    libreoffice-writer \
+    libreoffice-calc \
+    libreoffice-impress \
+    && rm -rf /var/lib/apt/lists/*
+
+# 安装Python依赖
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+# 创建工作目录
+WORKDIR /app
+
+# 复制应用代码
+COPY backend/ ./backend/
+COPY frontend/ ./frontend/
+COPY requirements.txt .
+COPY run.py .
+
+# 创建必要的目录
+RUN mkdir -p /app/uploads /app/logs && \
+    chmod 777 /app/uploads /app/logs
+
+# 暴露端口
+EXPOSE 5000 631
+
+# 设置CUPS配置
+RUN echo "ServerName localhost" > /etc/cups/client.conf && \
+    echo "Listen 631" >> /etc/cups/cupsd.conf && \
+    sed -i 's/Listen localhost:631/Listen 631/g' /etc/cups/cupsd.conf && \
+    sed -i 's/BrowseAddress @LOCAL/BrowseAddress 127.0.0.1:631/g' /etc/cups/cupsd.conf
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/health')" || exit 1
+
+# 启动命令
+CMD ["python", "run.py"]
+
+# ============================================
+# 使用说明：
+# 1. 在ARM64机器上构建：
+#    docker build -f Dockerfile.arm64 -t print-service:arm64 .
+#
+# 2. 保存为离线tar包：
+#    docker save print-service:arm64 -o print-service-arm64.tar
+#
+# 3. 在其他ARM64机器上加载：
+#    docker load < print-service-arm64.tar
+# ============================================

@@ -1,0 +1,321 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches: [main, master]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main, master]
+
+env:
+  # 阿里云容器镜像服务配置
+  REGISTRY: registry.cn-hangzhou.aliyuncs.com
+  IMAGE_NAME: ${{ secrets.ALIYUN_REPOSITORY_NAME }}
+  # GitHub镜像仓库配置（作为备份）
+  GHCR_REGISTRY: ghcr.io
+  GITHUB_REPOSITORY: ${{ github.repository }}
+
+jobs:
+  # 任务1: 构建和测试
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.platforms.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        id: buildx
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+            ${{ env.GHCR_REGISTRY }}/${{ env.GITHUB_REPOSITORY }}
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=raw,value=latest,enable={{ !startsWith(github.ref, 'refs/tags/') }}
+            type=sha,prefix=
+            type=raw,value=${{ github.ref_name }},enable=${{ startsWith(github.ref, 'refs/tags/') }}
+
+      - name: Determine target platforms
+        id: platforms
+        run: |
+          echo "matrix=[\"linux/amd64\",\"linux/arm64\"]" >> $GITHUB_OUTPUT
+
+      - name: Build Docker images (amd64 & arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ env.PLATFORMS }}
+          push: false
+          load: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ env.IMAGE_NAME }}
+          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAME }}
+          build-args: |
+            BUILD_DATE=${{ env.BUILD_DATE }}
+            VERSION=${{ github.ref_name }}
+          file: Dockerfile
+        env:
+          PLATFORMS: linux/amd64,linux/arm64
+          BUILD_DATE: ${{ env.BUILD_DATE }}
+
+      - name: Generate artifact manifest
+        run: |
+          echo "Build completed for platforms: linux/amd64, linux/arm64"
+          echo "Image tags: ${{ steps.meta.outputs.tags }}"
+
+  # 任务2: 推送到阿里云容器镜像服务
+  push-to-aliyun:
+    needs: build
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        id: buildx
+
+      - name: Log in to Aliyun Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
+          password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=raw,value=latest,enable={{ !startsWith(github.ref, 'refs/tags/') }}
+            type=sha,prefix=
+            type=raw,value=${{ github.ref_name }},enable=${{ startsWith(github.ref, 'refs/tags/') }}
+
+      - name: Build and push to Aliyun
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ env.IMAGE_NAME }}-aliyun
+          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAME }}-aliyun
+          build-args: |
+            BUILD_DATE=${{ env.BUILD_DATE }}
+            VERSION=${{ github.ref_name }}
+          file: Dockerfile
+
+      - name: Create and push manifest list
+        run: |
+          # 获取完整镜像标签
+          TAGS="${{ steps.meta.outputs.tags }}"
+          
+          # 创建manifest列表并推送到阿里云
+          for TAG in $TAGS; do
+            echo "Creating manifest for: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$TAG"
+          done
+
+      - name: Verify push
+        run: |
+          echo "✅ Successfully pushed to Aliyun Container Registry"
+          echo "Registry: ${{ env.REGISTRY }}"
+          echo "Repository: ${{ env.IMAGE_NAME }}"
+          echo "Tags: ${{ steps.meta.outputs.tags }}"
+
+  # 任务3: 导出离线tar文件（用于无法访问互联网的环境）
+  export-offline:
+    needs: build
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        id: buildx
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: offline-image
+          tags: |
+            type=sha
+            type=raw,value=latest,enable={{ !startsWith(github.ref, 'refs/tags/') }}
+            type=raw,value=${{ github.ref_name }},enable=${{ startsWith(github.ref, 'refs/tags/') }}
+
+      - name: Build and export as tar (ARM64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          push: false
+          load: true
+          tags: offline-image:${{ github.sha }}
+          output: type=docker,dest=./print-service-arm64.tar
+          build-args: |
+            BUILD_DATE=${{ env.BUILD_DATE }}
+            VERSION=${{ github.ref_name }}
+
+      - name: Upload offline tar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: print-service-arm64-offline
+          path: ./print-service-arm64.tar
+          compression-level: 1
+
+      - name: Calculate file size
+        run: |
+          SIZE=$(du -h ./print-service-arm64.tar | cut -f1)
+          echo "📦 Offline image size: $SIZE"
+          echo "offline_size=$SIZE" >> $GITHUB_OUTPUT
+
+      - name: Create checksums
+        run: |
+          sha256sum ./print-service-arm64.tar > ./print-service-arm64.tar.sha256
+          echo "SHA256 checksum:"
+          cat ./print-service-arm64.tar.sha256
+
+      - name: Upload checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: print-service-checksums
+          path: ./print-service-arm64.tar.sha256
+
+  # 任务4: 构建并导出多架构tar（可选，用于测试）
+  export-multiarch:
+    needs: build
+    runs-on: ubuntu-latest
+    if: false  # 禁用此任务，如需启用请删除此行
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        id: buildx
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: multiarch-image
+          tags: |
+            type=sha
+            type=raw,value=latest
+
+      - name: Build and export as tar (Multi-arch)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          load: true
+          tags: multiarch-image:${{ github.sha }}
+          output: type=oci,dest=./print-service-multiarch.tar
+          build-args: |
+            BUILD_DATE=${{ env.BUILD_DATE }}
+            VERSION=${{ github.ref_name }}
+
+      - name: Upload multi-arch artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: print-service-multiarch-offline
+          path: ./print-service-multiarch.tar
+          compression-level: 1
+
+  # 任务5: 创建版本发布（仅标签推送时）
+  create-release:
+    needs: [push-to-aliyun, export-offline]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version tag
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Download offline artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: print-service-arm64-offline
+          path: release/
+
+      - name: Download checksum artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: print-service-checksums
+          path: release/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: Release ${{ steps.version.outputs.version }}
+          body: |
+            ## Remote Print Service v${{ steps.version.outputs.version }}
+
+            ### Docker Images
+            - Aliyun Registry: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}`
+
+            ### Offline Package
+            - ARM64 Image: `print-service-arm64.tar`
+            - SHA256: See `print-service-arm64.tar.sha256`
+
+            ### Installation
+            ```bash
+            # Load the offline image
+            docker load < print-service-arm64.tar
+
+            # Run the service
+            docker run -d \
+              --name remote-print \
+              -p 5000:5000 \
+              -p 631:631 \
+              -v /path/to/uploads:/app/uploads \
+              offline-image:latest
+            ```
+          files: release/
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 任务6: 清理旧版本镜像（保持磁盘空间）
+  cleanup:
+    needs: [push-to-aliyun]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cleanup old artifacts
+        uses: glados/check-broken-links@v1
+        with:
+          mode: delete
+          token: ${{ secrets.GITHUB_TOKEN }}
