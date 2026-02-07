@@ -1,19 +1,21 @@
 # 远程打印服务 - ARM64 专用 Dockerfile（精简版）
-# 用于无法使用 buildx 构建多架构镜像的环境
-# 直接在 ARM64 机器上构建
 
 # ========== 构建阶段 ==========
 FROM python:3.11-slim-bookworm AS builder
 
-# 安装编译工具
+# 安装编译工具和 python-cups 依赖
 RUN apt-get update && apt-get install -y \
     gcc \
     libcups2-dev \
-    && rm -rf /var/lib/apt-lists/*
+    && rm -rf /var/lib/apt/lists/*
 
-# 安装Python依赖（使用wheel加速后续构建）
+# 先安装需要编译的包
+RUN pip install --no-cache-dir pycups>=2.0.1
+
+# 安装其他依赖并打包为wheel
 COPY requirements.txt /tmp/requirements.txt
-RUN pip wheel --no-cache-dir --wheel-dir /wheels -r /tmp/requirements.txt
+RUN grep -v 'pycups' /tmp/requirements.txt > /tmp/requirements_no_cups.txt && \
+    pip wheel --no-cache-dir --wheel-dir /wheels -r /tmp/requirements_no_cups.txt
 
 # ========== 运行阶段 ==========
 FROM python:3.11-slim-bookworm AS runner
