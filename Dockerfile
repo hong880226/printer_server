@@ -1,74 +1,70 @@
-# 远程打印服务 - Docker多阶段构建（精简版）
-
-# ========== 构建阶段 ==========
+# ========== 构建阶段：只打 wheels（更快、更稳） ==========
 FROM python:3.11-slim-bookworm AS builder
+WORKDIR /build
 
-# 安装编译工具和 python-cups 依赖
-RUN apt-get update && apt-get install -y \
-    gcc \
-    libcups2-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# 先安装需要编译的包
-RUN pip install --no-cache-dir pycups>=2.0.1
-
-# 安装其他依赖并打包为wheel
 COPY requirements.txt /tmp/requirements.txt
-RUN grep -v 'pycups' /tmp/requirements.txt > /tmp/requirements_no_cups.txt && \
-    pip wheel --no-cache-dir --wheel-dir /wheels -r /tmp/requirements_no_cups.txt
+RUN pip wheel --no-cache-dir --wheel-dir /wheels -r /tmp/requirements.txt
+
 
 # ========== 运行阶段 ==========
 FROM python:3.11-slim-bookworm AS runner
 
-# 只安装运行时必需的最小系统依赖
-RUN apt-get update && apt-get install -y \
-    cups \
-    cups-client \
-    cups-filters \
-    ghostscript \
-    poppler-utils \
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+# 运行时系统依赖：
+# - python3-cups: 提供 import cups
+# - cups/cups-filters/ghostscript/poppler-utils: 打印与格式处理
+# - weasyprint 运行库：cairo/pango/gdk-pixbuf 等
+# - supervisor: 同时拉起 cupsd + 你的服务
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-cups libcups2 \
+    cups cups-client cups-filters \
+    ghostscript poppler-utils \
     libmagic1 \
-    fonts-dejavu-core \
-    fonts-liberation \
-    && rm -rf /var/lib/apt/lists/*
+    fonts-dejavu-core fonts-liberation \
+    libcairo2 libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 \
+    libffi8 libjpeg62-turbo zlib1g libglib2.0-0 shared-mime-info \
+    supervisor \
+ && rm -rf /var/lib/apt/lists/*
 
-# 设置环境变量
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV DEBIAN_FRONTEND=noninteractive
+# 关键：让 /usr/local/bin/python(官方镜像) 也能加载 Debian dist-packages（cups 模块在这里）
+RUN python - <<'PY'
+import site, os
+sp = site.getsitepackages()[0]
+with open(os.path.join(sp, "debian-dist-packages.pth"), "w") as f:
+    f.write("/usr/lib/python3/dist-packages\n")
+    f.write("/usr/lib/python3.11/dist-packages\n")
+PY
 
-# 复制 requirements.txt 到运行阶段
-COPY --from=builder /tmp/requirements.txt /tmp/requirements.txt
-
-# 从构建阶段复制预编译的wheel
+# 安装 Python 依赖（离线 wheels）
+COPY requirements.txt /tmp/requirements.txt
 COPY --from=builder /wheels /wheels
-RUN pip install --no-cache-dir --find-links=/wheels -r /tmp/requirements.txt && \
-    rm -rf /wheels
+RUN pip install --no-cache-dir --no-index --find-links=/wheels -r /tmp/requirements.txt \
+ && rm -rf /wheels /tmp/requirements.txt
 
-# 创建工作目录
+# 应用代码
 WORKDIR /app
-
-# 复制应用代码
 COPY backend/ ./backend/
 COPY frontend/ ./frontend/
-COPY requirements.txt .
 COPY run.py .
 
-# 创建必要的目录
-RUN mkdir -p /app/uploads /app/logs && \
-    chmod 777 /app/uploads /app/logs
+RUN mkdir -p /app/uploads /app/logs && chmod 777 /app/uploads /app/logs
 
-# 暴露端口
+# CUPS 基础配置：允许容器内监听 631
+# 注意：不要用 echo > 覆盖整个 cupsd.conf，这里用 sed 修改默认配置更安全
+RUN sed -i 's/^\(Listen\).*/Listen 0.0.0.0:631/' /etc/cups/cupsd.conf || true \
+ && grep -q '^Port 631' /etc/cups/cupsd.conf || echo 'Port 631' >> /etc/cups/cupsd.conf \
+ && echo "ServerName localhost" > /etc/cups/client.conf
+
+# Supervisor 配置：同时启动 cupsd + 你的服务
+RUN mkdir -p /etc/supervisor/conf.d
+COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
 EXPOSE 5000 631
 
-# 设置CUPS配置
-RUN echo "ServerName localhost" > /etc/cups/client.conf && \
-    echo "Listen 631" > /etc/cups/cupsd.conf && \
-    sed -i 's/Listen localhost:631/Listen 631/g' /etc/cups/cupsd.conf
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/health')" || exit 1
 
-# 健康检查
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/health')" || exit 1
-
-# 启动命令
-CMD ["python", "run.py"]
+CMD ["supervisord", "-n"]
