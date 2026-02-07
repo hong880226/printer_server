@@ -1,12 +1,46 @@
 name: Build and Push Docker Image
 
 on:
+  # 推送代码触发
   push:
     branches: [main, master]
     tags:
       - 'v*'
+  # Pull Request触发
   pull_request:
     branches: [main, master]
+  # 手动触发（workflow_dispatch）
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: '选择构建架构（可多选）'
+        type: choice
+        required: true
+        default: 'arm64'
+        options:
+          - arm64
+          - amd64
+          - all
+      push_registry:
+        description: '推送到阿里云镜像仓库'
+        type: boolean
+        required: false
+        default: false
+      generate_offline:
+        description: '生成离线tar包'
+        type: boolean
+        required: false
+        default: true
+      tag:
+        description: '自定义镜像标签（可选，默认使用commit SHA）'
+        type: string
+        required: false
+        default: ''
+      dry_run:
+        description: '仅构建镜像，不推送或生成制品'
+        type: boolean
+        required: false
+        default: false
 
 env:
   # 阿里云容器镜像服务配置
@@ -22,6 +56,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.platforms.outputs.matrix }}
+      platforms_list: ${{ steps.platforms.outputs.platforms_list }}
+      build_amd64: ${{ steps.platforms.outputs.build_amd64 }}
+      build_arm64: ${{ steps.platforms.outputs.build_arm64 }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -43,17 +80,55 @@ jobs:
             type=raw,value=latest,enable={{ !startsWith(github.ref, 'refs/tags/') }}
             type=sha,prefix=
             type=raw,value=${{ github.ref_name }},enable=${{ startsWith(github.ref, 'refs/tags/') }}
+            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event.inputs.tag != '' }}
 
       - name: Determine target platforms
         id: platforms
         run: |
-          echo "matrix=[\"linux/amd64\",\"linux/arm64\"]" >> $GITHUB_OUTPUT
+          # 确定要构建的架构
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            PLATFORMS=${{ github.event.inputs.platforms }}
+            if [[ "$PLATFORMS" == "all" ]]; then
+              PLATFORMS="linux/amd64,linux/arm64"
+            elif [[ "$PLATFORMS" == "arm64" ]]; then
+              PLATFORMS="linux/arm64"
+            else
+              PLATFORMS="linux/amd64"
+            fi
+          else
+            PLATFORMS="linux/amd64,linux/arm64"
+          fi
+          
+          echo "PLATFORMS=$PLATFORMS"
+          echo "platforms_list=$PLATFORMS" >> $GITHUB_OUTPUT
+          
+          # 输出是否构建各架构
+          if echo "$PLATFORMS" | grep -q "linux/amd64"; then
+            echo "build_amd64=true" >> $GITHUB_OUTPUT
+          else
+            echo "build_amd64=false" >> $GITHUB_OUTPUT
+          fi
+          
+          if echo "$PLATFORMS" | grep -q "linux/arm64"; then
+            echo "build_arm64=true" >> $GITHUB_OUTPUT
+          else
+            echo "build_arm64=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # 输出JSON数组格式
+          if [[ "$PLATFORMS" == *"amd64"* && *"arm64"* ]]; then
+            echo "matrix=[\"linux/amd64\",\"linux/arm64\"]" >> $GITHUB_OUTPUT
+          elif [[ "$PLATFORMS" == *"amd64"* ]]; then
+            echo "matrix=[\"linux/amd64\"]" >> $GITHUB_OUTPUT
+          else
+            echo "matrix=[\"linux/arm64\"]" >> $GITHUB_OUTPUT
+          fi
 
-      - name: Build Docker images (amd64 & arm64)
+      - name: Build Docker images
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: ${{ env.PLATFORMS }}
+          platforms: ${{ steps.platforms.outputs.platforms_list }}
           push: false
           load: false
           tags: ${{ steps.meta.outputs.tags }}
@@ -62,21 +137,32 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAME }}
           build-args: |
             BUILD_DATE=${{ env.BUILD_DATE }}
-            VERSION=${{ github.ref_name }}
+            VERSION=${{ github.event.inputs.tag || github.ref_name }}
           file: Dockerfile
-        env:
-          PLATFORMS: linux/amd64,linux/arm64
-          BUILD_DATE: ${{ env.BUILD_DATE }}
 
       - name: Generate artifact manifest
         run: |
-          echo "Build completed for platforms: linux/amd64, linux/arm64"
+          echo "========================================"
+          echo "  Build Summary"
+          echo "========================================"
+          echo "Platforms: ${{ steps.platforms.outputs.platforms_list }}"
           echo "Image tags: ${{ steps.meta.outputs.tags }}"
+          echo "Event: ${{ github.event_name }}"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "Manual trigger options:"
+            echo "  - Push to registry: ${{ github.event.inputs.push_registry }}"
+            echo "  - Generate offline: ${{ github.event.inputs.generate_offline }}"
+            echo "  - Custom tag: ${{ github.event.inputs.tag || '(none)' }}"
+            echo "  - Dry run: ${{ github.event.inputs.dry_run }}"
+          fi
+          echo "========================================"
 
   # 任务2: 推送到阿里云容器镜像服务
   push-to-aliyun:
     needs: build
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
+    if: |
+      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))) ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.push_registry == 'true' && github.event.inputs.dry_run != 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -107,12 +193,13 @@ jobs:
             type=raw,value=latest,enable={{ !startsWith(github.ref, 'refs/tags/') }}
             type=sha,prefix=
             type=raw,value=${{ github.ref_name }},enable=${{ startsWith(github.ref, 'refs/tags/') }}
+            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event.inputs.tag != '' }}
 
       - name: Build and push to Aliyun
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ needs.build.outputs.platforms_list }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -120,30 +207,26 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAME }}-aliyun
           build-args: |
             BUILD_DATE=${{ env.BUILD_DATE }}
-            VERSION=${{ github.ref_name }}
+            VERSION=${{ github.event.inputs.tag || github.ref_name }}
           file: Dockerfile
-
-      - name: Create and push manifest list
-        run: |
-          # 获取完整镜像标签
-          TAGS="${{ steps.meta.outputs.tags }}"
-          
-          # 创建manifest列表并推送到阿里云
-          for TAG in $TAGS; do
-            echo "Creating manifest for: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$TAG"
-          done
 
       - name: Verify push
         run: |
-          echo "✅ Successfully pushed to Aliyun Container Registry"
+          echo "========================================"
+          echo "  ✅ Successfully pushed to Aliyun"
+          echo "========================================"
           echo "Registry: ${{ env.REGISTRY }}"
           echo "Repository: ${{ env.IMAGE_NAME }}"
           echo "Tags: ${{ steps.meta.outputs.tags }}"
+          echo "Platforms: ${{ needs.build.outputs.platforms_list }}"
+          echo "========================================"
 
-  # 任务3: 导出离线tar文件（用于无法访问互联网的环境）
+  # 任务3: 导出离线tar文件
   export-offline:
     needs: build
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.generate_offline == 'true' && github.event.inputs.dry_run != 'true')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -160,93 +243,79 @@ jobs:
           images: offline-image
           tags: |
             type=sha
-            type=raw,value=latest,enable={{ !startsWith(github.ref, 'refs/tags/') }}
-            type=raw,value=${{ github.ref_name }},enable=${{ startsWith(github.ref, 'refs/tags/') }}
+            type=raw,value=latest
+            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event.inputs.tag != '' }}
 
-      - name: Build and export as tar (ARM64)
+      - name: Build and export as tar (Multi-platform)
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/arm64
+          platforms: ${{ needs.build.outputs.platforms_list }}
           push: false
           load: true
           tags: offline-image:${{ github.sha }}
-          output: type=docker,dest=./print-service-arm64.tar
+          output: type=docker,dest=./print-service.tar
           build-args: |
             BUILD_DATE=${{ env.BUILD_DATE }}
-            VERSION=${{ github.ref_name }}
+            VERSION=${{ github.event.inputs.tag || github.ref_name }}
+
+      - name: Create manifest for multi-platform
+        if: ${{ needs.build.outputs.build_amd64 == 'true' && needs.build.outputs.build_arm64 == 'true' }}
+        run: |
+          # 重命名为包含架构信息的文件
+          docker save offline-image:${{ github.sha }} | tar -xf - -O */layer.tar | tar -tf - > /dev/null 2>&1 || true
+          mv ./print-service.tar ./print-service-${{ github.sha }}.tar
+
+      - name: Determine artifact name
+        id: artifact-name
+        run: |
+          if [[ "${{ needs.build.outputs.platforms_list }}" == *"arm64"* && *"amd64"* ]]; then
+            echo "name=print-service-multiarch" >> $GITHUB_OUTPUT
+          elif [[ "${{ needs.build.outputs.platforms_list }}" == *"arm64"* ]]; then
+            echo "name=print-service-arm64" >> $GITHUB_OUTPUT
+          else
+            echo "name=print-service-amd64" >> $GITHUB_OUTPUT
+          fi
 
       - name: Upload offline tar artifact
         uses: actions/upload-artifact@v4
         with:
-          name: print-service-arm64-offline
-          path: ./print-service-arm64.tar
+          name: ${{ steps.artifact-name.outputs.name }}-${{ github.sha }}
+          path: ./print-service*.tar
           compression-level: 1
 
       - name: Calculate file size
         run: |
-          SIZE=$(du -h ./print-service-arm64.tar | cut -f1)
-          echo "📦 Offline image size: $SIZE"
-          echo "offline_size=$SIZE" >> $GITHUB_OUTPUT
+          SIZE=$(du -h ./print-service*.tar | cut -f1 | head -1)
+          echo "========================================"
+          echo "  📦 Offline Image Ready"
+          echo "========================================"
+          echo "Size: $SIZE"
+          echo "Platforms: ${{ needs.build.outputs.platforms_list }}"
+          echo "========================================"
 
       - name: Create checksums
         run: |
-          sha256sum ./print-service-arm64.tar > ./print-service-arm64.tar.sha256
-          echo "SHA256 checksum:"
-          cat ./print-service-arm64.tar.sha256
+          for tarfile in ./print-service*.tar; do
+            if [[ -f "$tarfile" ]]; then
+              sha256sum "$tarfile" > "${tarfile}.sha256"
+              echo "SHA256 for $tarfile:"
+              cat "${tarfile}.sha256"
+            fi
+          done
 
-      - name: Upload checksum
+      - name: Upload checksums
         uses: actions/upload-artifact@v4
         with:
-          name: print-service-checksums
-          path: ./print-service-arm64.tar.sha256
+          name: print-service-checksums-${{ github.sha }}
+          path: ./print-service*.sha256
 
-  # 任务4: 构建并导出多架构tar（可选，用于测试）
-  export-multiarch:
-    needs: build
-    runs-on: ubuntu-latest
-    if: false  # 禁用此任务，如需启用请删除此行
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        id: buildx
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: multiarch-image
-          tags: |
-            type=sha
-            type=raw,value=latest
-
-      - name: Build and export as tar (Multi-arch)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: false
-          load: true
-          tags: multiarch-image:${{ github.sha }}
-          output: type=oci,dest=./print-service-multiarch.tar
-          build-args: |
-            BUILD_DATE=${{ env.BUILD_DATE }}
-            VERSION=${{ github.ref_name }}
-
-      - name: Upload multi-arch artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: print-service-multiarch-offline
-          path: ./print-service-multiarch.tar
-          compression-level: 1
-
-  # 任务5: 创建版本发布（仅标签推送时）
+  # 任务4: 创建版本发布（仅标签推送时或手动触发带标签时）
   create-release:
     needs: [push-to-aliyun, export-offline]
-    if: startsWith(github.ref, 'refs/tags/')
+    if: |
+      startsWith(github.ref, 'refs/tags/') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '' && github.event.inputs.dry_run != 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -259,20 +328,24 @@ jobs:
       - name: Get version tag
         id: version
         run: |
-          VERSION=${GITHUB_REF#refs/tags/}
+          if [[ "${{ github.event.inputs.tag }}" != "" ]]; then
+            VERSION="${{ github.event.inputs.tag }}"
+          else
+            VERSION=${GITHUB_REF#refs/tags/}
+          fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Download offline artifact
+      - name: Download offline artifacts
         uses: actions/download-artifact@v4
         with:
-          name: print-service-arm64-offline
+          pattern: print-service-*-*
           path: release/
+          merge-multiple: true
 
-      - name: Download checksum artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: print-service-checksums
-          path: release/
+      - name: List release files
+        run: |
+          echo "Release files:"
+          ls -lh release/
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -285,16 +358,24 @@ jobs:
             ### Docker Images
             - Aliyun Registry: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}`
 
-            ### Offline Package
-            - ARM64 Image: `print-service-arm64.tar`
-            - SHA256: See `print-service-arm64.tar.sha256`
+            ### Offline Packages
+            - Multi-platform image: `print-service-*.tar`
+            - SHA256 checksums: `print-service-*.tar.sha256`
 
             ### Installation
-            ```bash
-            # Load the offline image
-            docker load < print-service-arm64.tar
 
-            # Run the service
+            **From Aliyun Registry:**
+            ```bash
+            docker login registry.cn-hangzhou.aliyuncs.com -u 命名空间@云账号ID -p 密码
+            docker pull registry.cn-hangzhou.aliyuncs.com/命名空间/remote-print-service:${{ steps.version.outputs.version }}
+            ```
+
+            **From Offline Package:**
+            ```bash
+            # 加载离线镜像
+            docker load < print-service-*.tar
+
+            # 运行容器
             docker run -d \
               --name remote-print \
               -p 5000:5000 \
@@ -308,14 +389,30 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # 任务6: 清理旧版本镜像（保持磁盘空间）
-  cleanup:
-    needs: [push-to-aliyun]
-    if: startsWith(github.ref, 'refs/tags/')
+  # 任务5: 通知构建完成
+  notify:
+    needs: [build, push-to-aliyun, export-offline]
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
-      - name: Cleanup old artifacts
-        uses: glados/check-broken-links@v1
-        with:
-          mode: delete
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create completion summary
+        run: |
+          echo "========================================"
+          echo "  ✅ Manual Build Completed!"
+          echo "========================================"
+          echo ""
+          echo "Build Options:"
+          echo "  - Platforms: ${{ needs.build.outputs.platforms_list }}"
+          echo "  - Push to registry: ${{ github.event.inputs.push_registry }}"
+          echo "  - Generate offline: ${{ github.event.inputs.generate_offline }}"
+          echo "  - Custom tag: ${{ github.event.inputs.tag || '(none)' }}"
+          echo ""
+          echo "Artifacts:"
+          if [[ "${{ needs.build.outputs.build_arm64 }}" == "true" ]]; then
+            echo "  - ✅ ARM64 offline package available"
+          fi
+          if [[ "${{ needs.build.outputs.build_amd64 }}" == "true" ]]; then
+            echo "  - ✅ AMD64 offline package available"
+          fi
+          echo ""
+          echo "========================================"
