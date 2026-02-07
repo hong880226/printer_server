@@ -77,10 +77,9 @@ jobs:
           tags: |
             type=sha
             type=ref,event=branch
-            type=raw,value=latest,enable={{ !startsWith(github.ref, 'refs/tags/') }}
+            type=raw,value=latest,enable=startsWith(github.ref, 'refs/heads/')
             type=sha,prefix=
-            type=raw,value=${{ github.ref_name }},enable=${{ startsWith(github.ref, 'refs/tags/') }}
-            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event.inputs.tag != '' }}
+            type=raw,value=${{ github.event.inputs.tag }},enable=github.event.inputs.tag != ''
 
       - name: Determine target platforms
         id: platforms
@@ -160,9 +159,9 @@ jobs:
   # 任务2: 推送到阿里云容器镜像服务
   push-to-aliyun:
     needs: build
-    if: |
+    if: >-
       (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))) ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.push_registry == 'true' && github.event.inputs.dry_run != 'true')
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.push_registry == true && github.event.inputs.dry_run != true)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -190,10 +189,9 @@ jobs:
           tags: |
             type=sha
             type=ref,event=branch
-            type=raw,value=latest,enable={{ !startsWith(github.ref, 'refs/tags/') }}
+            type=raw,value=latest,enable=startsWith(github.ref, 'refs/heads/')
             type=sha,prefix=
-            type=raw,value=${{ github.ref_name }},enable=${{ startsWith(github.ref, 'refs/tags/') }}
-            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event.inputs.tag != '' }}
+            type=raw,value=${{ github.event.inputs.tag }},enable=github.event.inputs.tag != ''
 
       - name: Build and push to Aliyun
         uses: docker/build-push-action@v6
@@ -213,7 +211,7 @@ jobs:
       - name: Verify push
         run: |
           echo "========================================"
-          echo "  ✅ Successfully pushed to Aliyun"
+          echo "  Successfully pushed to Aliyun"
           echo "========================================"
           echo "Registry: ${{ env.REGISTRY }}"
           echo "Repository: ${{ env.IMAGE_NAME }}"
@@ -224,9 +222,9 @@ jobs:
   # 任务3: 导出离线tar文件
   export-offline:
     needs: build
-    if: |
+    if: >-
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.generate_offline == 'true' && github.event.inputs.dry_run != 'true')
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.generate_offline == true && github.event.inputs.dry_run != true)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -244,7 +242,7 @@ jobs:
           tags: |
             type=sha
             type=raw,value=latest
-            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event.inputs.tag != '' }}
+            type=raw,value=${{ github.event.inputs.tag }},enable=github.event.inputs.tag != ''
 
       - name: Build and export as tar (Multi-platform)
         uses: docker/build-push-action@v6
@@ -258,13 +256,6 @@ jobs:
           build-args: |
             BUILD_DATE=${{ env.BUILD_DATE }}
             VERSION=${{ github.event.inputs.tag || github.ref_name }}
-
-      - name: Create manifest for multi-platform
-        if: ${{ needs.build.outputs.build_amd64 == 'true' && needs.build.outputs.build_arm64 == 'true' }}
-        run: |
-          # 重命名为包含架构信息的文件
-          docker save offline-image:${{ github.sha }} | tar -xf - -O */layer.tar | tar -tf - > /dev/null 2>&1 || true
-          mv ./print-service.tar ./print-service-${{ github.sha }}.tar
 
       - name: Determine artifact name
         id: artifact-name
@@ -288,7 +279,7 @@ jobs:
         run: |
           SIZE=$(du -h ./print-service*.tar | cut -f1 | head -1)
           echo "========================================"
-          echo "  📦 Offline Image Ready"
+          echo "  Offline Image Ready"
           echo "========================================"
           echo "Size: $SIZE"
           echo "Platforms: ${{ needs.build.outputs.platforms_list }}"
@@ -299,8 +290,6 @@ jobs:
           for tarfile in ./print-service*.tar; do
             if [[ -f "$tarfile" ]]; then
               sha256sum "$tarfile" > "${tarfile}.sha256"
-              echo "SHA256 for $tarfile:"
-              cat "${tarfile}.sha256"
             fi
           done
 
@@ -310,12 +299,12 @@ jobs:
           name: print-service-checksums-${{ github.sha }}
           path: ./print-service*.sha256
 
-  # 任务4: 创建版本发布（仅标签推送时或手动触发带标签时）
+  # 任务4: 创建版本发布
   create-release:
     needs: [push-to-aliyun, export-offline]
-    if: |
+    if: >-
       startsWith(github.ref, 'refs/tags/') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '' && github.event.inputs.dry_run != 'true')
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '' && github.event.inputs.dry_run != true)
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -342,11 +331,6 @@ jobs:
           path: release/
           merge-multiple: true
 
-      - name: List release files
-        run: |
-          echo "Release files:"
-          ls -lh release/
-
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -363,25 +347,9 @@ jobs:
             - SHA256 checksums: `print-service-*.tar.sha256`
 
             ### Installation
-
-            **From Aliyun Registry:**
             ```bash
             docker login registry.cn-hangzhou.aliyuncs.com -u 命名空间@云账号ID -p 密码
             docker pull registry.cn-hangzhou.aliyuncs.com/命名空间/remote-print-service:${{ steps.version.outputs.version }}
-            ```
-
-            **From Offline Package:**
-            ```bash
-            # 加载离线镜像
-            docker load < print-service-*.tar
-
-            # 运行容器
-            docker run -d \
-              --name remote-print \
-              -p 5000:5000 \
-              -p 631:631 \
-              -v /path/to/uploads:/app/uploads \
-              offline-image:latest
             ```
           files: release/
           draft: false
@@ -398,7 +366,7 @@ jobs:
       - name: Create completion summary
         run: |
           echo "========================================"
-          echo "  ✅ Manual Build Completed!"
+          echo "  Manual Build Completed"
           echo "========================================"
           echo ""
           echo "Build Options:"
@@ -406,13 +374,5 @@ jobs:
           echo "  - Push to registry: ${{ github.event.inputs.push_registry }}"
           echo "  - Generate offline: ${{ github.event.inputs.generate_offline }}"
           echo "  - Custom tag: ${{ github.event.inputs.tag || '(none)' }}"
-          echo ""
-          echo "Artifacts:"
-          if [[ "${{ needs.build.outputs.build_arm64 }}" == "true" ]]; then
-            echo "  - ✅ ARM64 offline package available"
-          fi
-          if [[ "${{ needs.build.outputs.build_amd64 }}" == "true" ]]; then
-            echo "  - ✅ AMD64 offline package available"
-          fi
           echo ""
           echo "========================================"
