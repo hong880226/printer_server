@@ -50,6 +50,8 @@ COPY backend/ ./backend/
 COPY frontend/ ./frontend/
 # Flask默认在backend/templates/找模板，所以需要复制一份
 COPY frontend/templates/ ./backend/templates/
+# Flask默认从backend/static/提供静态文件
+COPY frontend/static/ ./backend/static/
 COPY run.py .
 
 RUN mkdir -p /app/uploads /app/logs && chmod 777 /app/uploads /app/logs
