@@ -77,6 +77,10 @@ class FileHandler:
             elif file_type.startswith('text/') or extension == 'txt':
                 return self._generate_text_preview(file_path, output_name, width, height)
             
+            # Office文档（轻量级预览）
+            elif extension in ['doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx']:
+                return self._generate_office_preview(file_path, output_name, width, height)
+            
             # 暂时不支持其他格式的预览
             else:
                 logger.info(f"文件类型 {file_type} 暂不支持预览生成")
@@ -85,6 +89,103 @@ class FileHandler:
         except Exception as e:
             logger.error(f"生成预览失败: {e}")
             return None
+    
+    def _generate_office_preview(
+        self,
+        file_path: str,
+        output_name: str,
+        width: int,
+        height: int
+    ) -> Optional[str]:
+        """
+        生成Office文档轻量级预览（提取文字生成图片）
+        """
+        try:
+            from docx import Document
+            import openpyxl
+            from pptx import Presentation
+            
+            extension = self.get_file_extension(file_path)
+            text_content = ""
+            
+            # 提取文字内容
+            if extension in ['doc', 'docx']:
+                doc = Document(file_path)
+                for para in doc.paragraphs[:20]:  # 限制提取前20段
+                    text_content += para.text + "\n"
+                    
+            elif extension in ['xls', 'xlsx']:
+                wb = openpyxl.load_workbook(file_path)
+                ws = wb.active
+                for row in ws.iter_rows(max_row=20, max_col=5):
+                    row_text = " | ".join([str(cell.value) for cell in row if cell.value])
+                    if row_text.strip():
+                        text_content += row_text + "\n"
+                        
+            elif extension in ['ppt', 'pptx']:
+                prs = Presentation(file_path)
+                for slide in prs.slides[:5]:  # 限制提取前5页
+                    for shape in slide.shapes:
+                        if hasattr(shape, "text"):
+                            text_content += shape.text + "\n"
+            
+            # 生成文字预览图
+            if text_content.strip():
+                return self._text_to_preview_image(text_content, output_name, width, height)
+            
+            return None
+            
+        except ImportError as e:
+            logger.warning(f"Office库未安装: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Office预览生成失败: {e}")
+            return None
+    
+    def _text_to_preview_image(
+        self,
+        text_content: str,
+        output_name: str,
+        width: int,
+        height: int
+    ) -> str:
+        """将文字内容转换为预览图"""
+        from PIL import Image, ImageDraw, ImageFont
+        
+        img = Image.new('RGB', (width, height), color='white')
+        draw = ImageDraw.Draw(img)
+        
+        # 使用默认字体（轻量化，不依赖系统字体）
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12)
+        except:
+            font = ImageFont.load_default()
+        
+        # 限制文字长度
+        max_chars = 2000
+        text_content = text_content[:max_chars] + ("..." if len(text_content) > max_chars else "")
+        
+        # 绘制标题
+        title = f"文档预览 (前 {len(text_content)} 字符)"
+        try:
+            title_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
+        except:
+            title_font = font
+        draw.text((20, 20), title, fill='#333', font=title_font)
+        
+        # 绘制内容
+        y = 50
+        lines = text_content.split('\n')
+        for line in lines:
+            if y > height - 40:
+                break
+            draw.text((20, y), line.strip()[:100], fill='#666', font=font)
+            y += 16
+        
+        output_path = os.path.join(self.preview_folder, f"{output_name}.png")
+        img.save(output_path, 'PNG')
+        
+        return f"/previews/{output_name}.png"
     
     def _generate_image_preview(
         self,

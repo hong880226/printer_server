@@ -19,9 +19,13 @@ class PrintService {
         this.loadFiles();
         this.loadJobs();
         
-        // 定时刷新状态
-        setInterval(() => this.loadPrinterStatus(), 10000);
-        setInterval(() => this.loadJobs(), 5000);
+        // 定时刷新状态（不中断初始化）
+        setInterval(() => {
+            this.loadPrinterStatus().catch(() => {});
+        }, 10000);
+        setInterval(() => {
+            this.loadJobs().catch(() => {});
+        }, 5000);
     }
 
     bindEvents() {
@@ -135,13 +139,19 @@ class PrintService {
 
     async loadPrinters() {
         try {
-            const response = await fetch(`${this.apiBase}/printers`);
-            const result = await response.json();
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000);
             
+            const response = await fetch(`${this.apiBase}/printers`, {
+                signal: controller.signal
+            });
+            clearTimeout(timeoutId);
+            
+            const result = await response.json();
             const select = document.getElementById('printerSelect');
             select.innerHTML = '';
             
-            if (result.success && result.printers.length > 0) {
+            if (result.success && result.printers && result.printers.length > 0) {
                 result.printers.forEach(printer => {
                     const option = document.createElement('option');
                     option.value = printer.name;
@@ -156,13 +166,26 @@ class PrintService {
             }
             
         } catch (error) {
-            console.error('加载打印机列表失败:', error);
+            const select = document.getElementById('printerSelect');
+            select.innerHTML = '';
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = '打印机服务不可用';
+            select.appendChild(option);
+            console.warn('加载打印机列表失败:', error.message);
         }
     }
 
     async loadPrinterStatus() {
         try {
-            const response = await fetch(`${this.apiBase}/printer/status`);
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000);
+            
+            const response = await fetch(`${this.apiBase}/printer/status`, {
+                signal: controller.signal
+            });
+            clearTimeout(timeoutId);
+            
             const result = await response.json();
             
             const statusDot = document.getElementById('statusDot');
