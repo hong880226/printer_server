@@ -30,7 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # 创建应用
-app = Flask(__name__)
+app = Flask(__name__, static_url_path='/static', static_folder='/app/frontend/static')
 app.config['MAX_CONTENT_LENGTH'] = MAX_CONTENT_LENGTH
 CORS(app)
 

@@ -9,7 +9,6 @@ services:
     restart: unless-stopped
     ports:
       - "5000:5000"
-      - "631:631"
     environment:
       - SERVICE_HOST=0.0.0.0
       - SERVICE_PORT=5000
@@ -23,18 +22,12 @@ services:
     volumes:
       # 挂载上传文件目录
       - print_uploads:/app/uploads
-      # 挂载CUPS配置
-      - cups_config:/etc/cups
       # 挂载日志
       - print_logs:/app/logs
-      # 挂载打印机设备
-      - /dev/usb:/dev/usb
-    devices:
-      # USB打印机设备
-      - /dev/bus/usb:/dev/bus/usb
     privileged: true
-    networks:
-      - print_network
+    network_mode: host
+    cap_add:
+      - SYS_ADMIN
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/health')"]
       interval: 30s
@@ -45,11 +38,5 @@ services:
 volumes:
   print_uploads:
     driver: local
-  cups_config:
-    driver: local
   print_logs:
     driver: local
-
-networks:
-  print_network:
-    driver: bridge
