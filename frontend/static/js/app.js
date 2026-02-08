@@ -228,20 +228,25 @@ class PrintService {
         try {
             const response = await fetch(`${this.apiBase}/files`);
             const result = await response.json();
+            console.log('[Files] 响应数据:', result);
             
             if (result.success) {
                 this.files = result.files;
                 this.renderFiles(result.files);
+            } else {
+                console.warn('[Files] 获取失败:', result.error);
             }
             
         } catch (error) {
             this.showNotification('加载文件列表失败', 'error');
+            console.error('[Files] 加载失败:', error);
         }
     }
 
     renderFiles(files) {
         const grid = document.getElementById('filesGrid');
         const emptyState = document.getElementById('emptyState');
+        console.log('[Files] 渲染文件数:', files ? files.length : 0);
         
         if (!files || files.length === 0) {
             grid.innerHTML = '';
@@ -449,24 +454,28 @@ class PrintService {
             clearTimeout(timeoutId);
             
             const result = await response.json();
+            console.log('[Jobs] 响应数据:', result);
             
             if (result.success) {
-                this.renderJobs(result.cups_jobs);
+                this.renderJobs(result.cups_jobs || []);
+            } else {
+                console.warn('[Jobs] 获取失败:', result.error);
             }
             
         } catch (error) {
             if (error.name === 'AbortError') {
-                console.warn('加载打印任务超时');
+                console.warn('[Jobs] 加载超时');
             } else if (error.name === 'TypeError' && error.message.includes('fetch')) {
-                console.warn('无法连接到CUPS服务，检查CUPS状态');
+                console.warn('[Jobs] 无法连接到服务');
             } else {
-                console.error('加载打印任务失败:', error);
+                console.error('[Jobs] 加载失败:', error);
             }
         }
     }
 
     renderJobs(jobs) {
         const list = document.getElementById('jobsList');
+        console.log('[Jobs] 渲染任务数:', jobs ? jobs.length : 0);
         
         if (!jobs || jobs.length === 0) {
             list.innerHTML = '<div class="empty-state"><p>暂无打印任务</p></div>';

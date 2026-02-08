@@ -333,38 +333,61 @@ class FileHandler:
         return file_path
     
     def _office_to_pdf(self, file_path: str, output_path: str) -> str:
-        """Office文档转PDF (使用libreoffice或weasyprint)"""
+        """Office文档转PDF"""
+        extension = self.get_file_extension(file_path).lower()
+        logger.info(f"开始转换Office文档: {file_path} -> {output_path}")
+        
         try:
-            # 尝试使用weasyprint
-            from weasyprint import HTML
+            # DOCX 转 PDF
+            if extension in ['doc', 'docx']:
+                result = self._docx_to_pdf(file_path, output_path)
+                if result != file_path:
+                    return result
+                    
+            # XLSX 转 PDF
+            elif extension in ['xls', 'xlsx']:
+                result = self._xlsx_to_pdf(file_path, output_path)
+                if result != file_path:
+                    return result
+                    
+            # PPTX 转 PDF
+            elif extension in ['ppt', 'pptx']:
+                result = self._pptx_to_pdf(file_path, output_path)
+                if result != file_path:
+                    return result
             
-            if self.get_file_extension(file_path) in ['doc', 'docx']:
-                return self._docx_to_pdf(file_path, output_path)
-            elif self.get_file_extension(file_path) in ['xls', 'xlsx']:
-                return self._xlsx_to_pdf(file_path, output_path)
-        
+            logger.error(f"Office文档转换失败: {file_path}")
+            return file_path
+            
         except Exception as e:
-            logger.warning(f"WeasyPrint转换失败，尝试其他方法: {e}")
-        
-        return file_path
+            logger.error(f"Office文档转换异常: {e}")
+            return file_path
     
     def _docx_to_pdf(self, file_path: str, output_path: str) -> str:
         """DOCX转PDF"""
         try:
             from docx import Document
+            from weasyprint import HTML
             
             doc = Document(file_path)
             
-            # 创建简单的HTML用于PDF生成
-            html_content = "<html><body>"
+            # 创建HTML（保留基本格式）
+            html_content = "<html><head><meta charset='utf-8'></head><body>"
             for para in doc.paragraphs:
-                html_content += f"<p>{para.text}</p>"
+                text = para.text.strip()
+                if text:
+                    # 检测标题样式
+                    if para.style.name.startswith('Heading'):
+                        level = int(para.style.name.replace('Heading', '')) or 2
+                        html_content += f"<h{level}>{text}</h{level}>"
+                    else:
+                        html_content += f"<p>{text}</p>"
             html_content += "</body></html>"
             
-            from weasyprint import HTML
             HTML(string=html_content).write_pdf(output_path)
+            logger.info(f"DOCX转PDF成功: {output_path}")
             return output_path
-        
+            
         except Exception as e:
             logger.error(f"DOCX转PDF失败: {e}")
             return file_path
@@ -374,26 +397,87 @@ class FileHandler:
         try:
             import openpyxl
             from openpyxl.utils.dataframe import dataframe_to_rows
+            from weasyprint import HTML
             
             wb = openpyxl.load_workbook(file_path)
             ws = wb.active
             
+            # 获取所有数据
+            data = []
+            for row in ws.iter_rows(max_row=ws.max_row or 100, max_col=ws.max_column or 10):
+                data.append([cell.value for cell in row])
+            
+            if not data:
+                return file_path
+            
             # 创建HTML表格
-            html_content = "<html><body><table border='1'>"
-            for r_idx, row in enumerate(dataframe_to_rows(ws, index=False, header=True), 1):
+            html_content = "<html><head><meta charset='utf-8'></head><body>"
+            html_content += "<h2>Excel表格</h2>"
+            html_content += "<table border='1' style='border-collapse: collapse; width: 100%;'>"
+            
+            for r_idx, row in enumerate(data):
                 html_content += "<tr>"
                 for c_idx, value in enumerate(row):
-                    tag = "th" if r_idx == 1 else "td"
-                    html_content += f"<{tag}>{value}</{tag}>"
+                    tag = "th" if r_idx == 0 else "td"
+                    cell_value = str(value or '')
+                    html_content += f"<{tag}>{cell_value}</{tag}>"
                 html_content += "</tr>"
+            
             html_content += "</table></body></html>"
             
-            from weasyprint import HTML
             HTML(string=html_content).write_pdf(output_path)
+            logger.info(f"XLSX转PDF成功: {output_path}")
             return output_path
-        
+            
         except Exception as e:
             logger.error(f"XLSX转PDF失败: {e}")
+            return file_path
+    
+    def _pptx_to_pdf(self, file_path: str, output_path: str) -> str:
+        """PPTX转PDF（提取所有幻灯片为图片再合成PDF）"""
+        try:
+            from pptx import Presentation
+            from PIL import Image
+            import io
+            
+            prs = Presentation(file_path)
+            
+            # 获取幻灯片尺寸
+            slide_width = prs.slide_width
+            slide_height = prs.slide_height
+            
+            # 创建图片列表
+            images = []
+            for slide in prs.slides:
+                # 创建空白图片
+                img = Image.new('RGB', (int(slide_width/9525), int(slide_height/9525)), 'white')
+                draw = ImageDraw.Draw(img)
+                
+                # 提取文字
+                text_content = []
+                for shape in slide.shapes:
+                    if hasattr(shape, "text"):
+                        text_content.append(shape.text.strip())
+                
+                # 绘制文字
+                y = 20
+                for line in text_content[:20]:
+                    if y > img.height - 40:
+                        break
+                    draw.text((20, y), line, fill='black')
+                    y += 24
+                
+                images.append(img)
+            
+            if images:
+                images[0].save(output_path, save_all=True, append_images=images[1:])
+                logger.info(f"PPTX转PDF成功: {output_path}")
+                return output_path
+            
+            return file_path
+            
+        except Exception as e:
+            logger.error(f"PPTX转PDF失败: {e}")
             return file_path
     
     def _text_to_pdf(self, file_path: str, output_path: str) -> str:

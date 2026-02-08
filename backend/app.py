@@ -133,7 +133,10 @@ def upload_file():
             )
             
             if preview_path:
+                logger.info(f"预览已生成: {preview_path}")
                 file_info['preview_path'] = preview_path
+            else:
+                logger.warning(f"预览生成失败或不支持: {original_filename}")
             
             return jsonify({
                 'success': True,
@@ -151,11 +154,19 @@ def list_files():
     """列出已上传的文件"""
     try:
         files = file_handler.list_files(UPLOAD_FOLDER)
+        logger.info(f"列出文件: 共 {len(files)} 个文件")
         file_list = []
         
         for f in files:
             preview_name = os.path.splitext(f['filename'])[0]
-            preview_path = f"/previews/{preview_name}.png"
+            preview_file = os.path.join(UPLOAD_FOLDER, 'previews', f'{preview_name}.png')
+            has_preview = os.path.exists(preview_file)
+            preview_path = f"/previews/{preview_name}.png" if has_preview else None
+            
+            if has_preview:
+                logger.debug(f"  - {f['filename']}: 有预览")
+            else:
+                logger.debug(f"  - {f['filename']}: 无预览")
             
             file_list.append({
                 'filename': f['filename'],
@@ -163,7 +174,7 @@ def list_files():
                 'size': file_handler.format_file_size(f['size']),
                 'size_bytes': f['size'],
                 'created': f['created'].isoformat(),
-                'preview_path': preview_path if os.path.exists(os.path.join(UPLOAD_FOLDER, 'previews', f'{preview_name}.png')) else None
+                'preview_path': preview_path
             })
         
         return jsonify({
@@ -203,6 +214,18 @@ def delete_file(filename):
     except Exception as e:
         logger.error(f"删除文件失败: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/previews/<path:filename>')
+def serve_preview(filename):
+    """提供预览图片访问"""
+    try:
+        preview_path = os.path.join(UPLOAD_FOLDER, 'previews', filename)
+        if os.path.exists(preview_path):
+            return send_file(preview_path, mimetype='image/png')
+        return jsonify({'error': '预览不存在'}), 404
+    except Exception as e:
+        logger.error(f"提供预览失败: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/preview/<filename>')
 def get_preview(filename):
@@ -245,13 +268,28 @@ def print_file():
         if not target_file:
             return jsonify({'success': False, 'error': '文件不存在'}), 404
         
+        file_path = target_file['path']
+        file_type = file_handler.get_file_type(file_path)
+        extension = file_handler.get_file_extension(filename).lower()
+        
+        # Office 文档需要转换为 PDF
+        print_file_path = file_path
+        if extension in ['doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx']:
+            logger.info(f"Office文档需转换为PDF: {filename}")
+            pdf_path = file_handler.convert_to_pdf(file_path)
+            if pdf_path and pdf_path != file_path:
+                print_file_path = pdf_path
+                logger.info(f"已转换为PDF: {pdf_path}")
+            else:
+                return jsonify({'success': False, 'error': '文档转换PDF失败'}), 500
+        
         # 创建打印任务
         job_id = str(uuid.uuid4())[:8]
         job = PrintJob(
             job_id=job_id,
             filename=filename,
-            file_path=target_file['path'],
-            file_type=file_handler.get_file_type(target_file['path']),
+            file_path=print_file_path,
+            file_type=file_type,
             copies=copies,
             page_range=page_range,
             printer_name=printer_name,
@@ -266,7 +304,7 @@ def print_file():
         try:
             cups_job_id = cups_service.print_file(
                 printer_name=printer_name,
-                file_path=target_file['path'],
+                file_path=print_file_path,
                 job_name=f"RemotePrint-{job_id}",
                 copies=copies,
                 page_range=page_range
