@@ -44,7 +44,7 @@ env:
   # 阿里云命名空间 + 仓库名组合
   IMAGE_NAMESPACE: ${{ secrets.ALIYUN_IMAGE_NAMESPACE }}
   # secrets 在 PR(fork) 场景可能为空，给个兜底
-  IMAGE_NAME: ${{ secrets.ALIYUN_REPOSITORY_NAME || 'printer_server' }}
+  IMAGE_NAME:  'remoteprint'
   GHCR_REGISTRY: ghcr.io
   GITHUB_REPOSITORY: ${{ github.repository }}
 

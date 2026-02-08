@@ -320,11 +320,19 @@ class FileHandler:
             return file_path
     
     def delete_file(self, file_path: str) -> bool:
-        """删除文件"""
+        """删除文件及其预览"""
         try:
             if os.path.exists(file_path):
                 os.remove(file_path)
                 logger.info(f"已删除文件: {file_path}")
+                
+                # 同时删除预览文件
+                preview_name = os.path.splitext(os.path.basename(file_path))[0]
+                preview_path = os.path.join(self.preview_folder, f"{preview_name}.png")
+                if os.path.exists(preview_path):
+                    os.remove(preview_path)
+                    logger.info(f"已删除预览: {preview_path}")
+                
                 return True
             return False
         except Exception as e:

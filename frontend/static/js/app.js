@@ -262,6 +262,7 @@ class PrintService {
             <div class="file-actions">
                 <button class="btn btn-primary btn-sm preview-btn" data-filename="${file.filename}">预览</button>
                 <button class="btn btn-secondary btn-sm print-btn" data-filename="${file.filename}">打印</button>
+                <button class="btn btn-danger btn-sm delete-btn" data-filename="${file.filename}">删除</button>
             </div>
         `;
         
@@ -274,6 +275,11 @@ class PrintService {
         card.querySelector('.print-btn').addEventListener('click', (e) => {
             e.stopPropagation();
             this.printFile(file.filename);
+        });
+        
+        card.querySelector('.delete-btn').addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.deleteFile(file.filename);
         });
         
         card.addEventListener('click', () => {
@@ -411,7 +417,14 @@ class PrintService {
 
     async loadJobs() {
         try {
-            const response = await fetch(`${this.apiBase}/jobs`);
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000);
+            
+            const response = await fetch(`${this.apiBase}/jobs`, {
+                signal: controller.signal
+            });
+            clearTimeout(timeoutId);
+            
             const result = await response.json();
             
             if (result.success) {
@@ -419,7 +432,13 @@ class PrintService {
             }
             
         } catch (error) {
-            console.error('加载打印任务失败:', error);
+            if (error.name === 'AbortError') {
+                console.warn('加载打印任务超时');
+            } else if (error.name === 'TypeError' && error.message.includes('fetch')) {
+                console.warn('无法连接到CUPS服务，检查CUPS状态');
+            } else {
+                console.error('加载打印任务失败:', error);
+            }
         }
     }
 
