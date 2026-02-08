@@ -3,6 +3,7 @@ CUPS服务封装
 """
 import cups
 import logging
+import os
 from typing import List, Optional
 from backend.models import Printer, PrintJobStatus
 
@@ -12,32 +13,52 @@ class CupsService:
     def __init__(self, server: str = 'localhost', port: int = 631):
         self.server = server
         self.port = port
-        self.connection = None
-
-    def connect(self):
-        """建立与CUPS服务器的连接"""
+        self._connection = None
+    
+    def _create_connection(self):
+        """创建新的CUPS连接"""
         try:
             # 优先使用本地socket
-            import os
             if os.path.exists('/run/cups/cups.sock'):
-                self.connection = cups.Connection()
-                logger.info("通过本地 socket 连接到 CUPS")
+                logger.debug("通过本地 socket 连接到 CUPS")
+                return cups.Connection()
             else:
-                # 回退到 TCP 连接
-                self.connection = cups.Connection(host=self.server, port=self.port)
-                logger.info(f"通过 TCP 连接到 CUPS 服务器: {self.server}:{self.port}")
+                logger.debug(f"通过 TCP 连接到 CUPS: {self.server}:{self.port}")
+                return cups.Connection(host=self.server, port=self.port)
+        except Exception as e:
+            logger.error(f"创建CUPS连接失败: {e}")
+            raise
+    
+    def connect(self) -> bool:
+        """显式建立连接"""
+        try:
+            self._connection = self._create_connection()
+            logger.info("CUPS连接已建立")
             return True
         except Exception as e:
-            logger.error(f"连接CUPS服务器失败: {e}")
+            logger.error(f"CUPS连接失败: {e}")
             return False
+    
+    def _ensure_connection(self):
+        """确保有有效连接，如果连接失效则重新创建"""
+        try:
+            # 尝试使用现有连接
+            if self._connection is not None:
+                # 通过调用一个轻量级操作来测试连接是否有效
+                self._connection.getPrinters()
+                return self._connection
+        except Exception as e:
+            logger.warning(f"CUPS连接已失效，重新连接: {e}")
+        
+        # 重新创建连接
+        self._connection = self._create_connection()
+        return self._connection
     
     def get_printers(self) -> List[Printer]:
         """获取所有可用打印机"""
         try:
-            if not self.connection:
-                self.connect()
-            
-            printers = self.connection.getPrinters()
+            conn = self._ensure_connection()
+            printers = conn.getPrinters()
             printer_list = []
             
             for name, attrs in printers.items():
@@ -61,10 +82,8 @@ class CupsService:
     def get_printer(self, printer_name: str) -> Optional[Printer]:
         """获取指定打印机信息"""
         try:
-            if not self.connection:
-                self.connect()
-            
-            attrs = self.connection.getPrinterAttributes(printer_name)
+            conn = self._ensure_connection()
+            attrs = conn.getPrinterAttributes(printer_name)
             return Printer(
                 name=printer_name,
                 uri=attrs.get('device-uri', ''),
@@ -80,16 +99,14 @@ class CupsService:
     def get_printer_status(self, printer_name: str) -> str:
         """获取打印机状态"""
         try:
-            if not self.connection:
-                self.connect()
-            
+            conn = self._ensure_connection()
             state_map = {
                 3: "idle",
                 4: "processing",
                 5: "stopped"
             }
             
-            attrs = self.connection.getPrinterAttributes(printer_name)
+            attrs = conn.getPrinterAttributes(printer_name)
             state = attrs.get('printer-state', 0)
             return state_map.get(state, "unknown")
         
@@ -119,8 +136,7 @@ class CupsService:
             作业ID
         """
         try:
-            if not self.connection:
-                self.connect()
+            conn = self._ensure_connection()
             
             options = {}
             if copies > 1:
@@ -129,14 +145,14 @@ class CupsService:
                 options['page-range'] = page_range
             
             # 添加作业
-            job_id = self.connection.printFile(
+            job_id = conn.printFile(
                 printer_name,
                 file_path,
                 job_name,
                 options
             )
             
-            logger.info(f"打印作业已提交: 作业ID={job_id}, 打印机={printer_name}")
+            logger.info(f"打印作业已提交: 作业ID={job_id}, 打印机={printer_name}, 文件={os.path.basename(file_path)}")
             return job_id
         
         except Exception as e:
@@ -146,10 +162,8 @@ class CupsService:
     def get_jobs(self, printer_name: str = None) -> List[dict]:
         """获取打印作业列表"""
         try:
-            if not self.connection:
-                self.connect()
-            
-            jobs = self.connection.getJobs(printer_name)
+            conn = self._ensure_connection()
+            jobs = conn.getJobs(printer_name)
             job_list = []
             
             for job_id, attrs in jobs.items():
@@ -172,10 +186,8 @@ class CupsService:
     def cancel_job(self, job_id: int) -> bool:
         """取消打印作业"""
         try:
-            if not self.connection:
-                self.connect()
-            
-            self.connection.cancelJob(job_id, purge_job=False)
+            conn = self._ensure_connection()
+            conn.cancelJob(job_id, purge_job=False)
             logger.info(f"已取消作业: {job_id}")
             return True
         
@@ -186,10 +198,8 @@ class CupsService:
     def get_job_status(self, job_id: int) -> dict:
         """获取作业状态"""
         try:
-            if not self.connection:
-                self.connect()
-            
-            jobs = self.connection.getJobs()
+            conn = self._ensure_connection()
+            jobs = conn.getJobs()
             if job_id in jobs:
                 attrs = jobs[job_id]
                 return {
@@ -213,10 +223,8 @@ class CupsService:
     ) -> bool:
         """添加打印机"""
         try:
-            if not self.connection:
-                self.connect()
-            
-            self.connection.addPrinter(
+            conn = self._ensure_connection()
+            conn.addPrinter(
                 name,
                 device=uri,
                 info=info,
