@@ -13,12 +13,19 @@ class CupsService:
         self.server = server
         self.port = port
         self.connection = None
-    
+
     def connect(self):
         """建立与CUPS服务器的连接"""
         try:
-            self.connection = cups.Connection(host=self.server, port=self.port)
-            logger.info(f"成功连接到CUPS服务器: {self.server}:{self.port}")
+            # 优先使用本地socket
+            import os
+            if os.path.exists('/run/cups/cups.sock'):
+                self.connection = cups.Connection()
+                logger.info("通过本地 socket 连接到 CUPS")
+            else:
+                # 回退到 TCP 连接
+                self.connection = cups.Connection(host=self.server, port=self.port)
+                logger.info(f"通过 TCP 连接到 CUPS 服务器: {self.server}:{self.port}")
             return True
         except Exception as e:
             logger.error(f"连接CUPS服务器失败: {e}")

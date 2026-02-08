@@ -12,22 +12,15 @@ services:
     environment:
       - SERVICE_HOST=0.0.0.0
       - SERVICE_PORT=5000
-      - CUPS_SERVER=localhost
-      - CUPS_PORT=631
-      - CUPS_PRINTER_NAME=HP_DeskJet_4900
       - UPLOAD_FOLDER=/app/uploads
       - MAX_CONTENT_LENGTH=52428800
       - DEBUG_MODE=false
       - TZ=Asia/Shanghai
     volumes:
-      # 挂载上传文件目录
       - print_uploads:/app/uploads
-      # 挂载日志
       - print_logs:/app/logs
+      - /run/cups/cups.sock:/run/cups/cups.sock:ro
     privileged: true
-    network_mode: host
-    cap_add:
-      - SYS_ADMIN
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/health')"]
       interval: 30s
