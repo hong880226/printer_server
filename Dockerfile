@@ -6,10 +6,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
 
-# 可选功能开关：默认更轻
-ARG WITH_POPPLER=0
-ARG WITH_EXTRA_FONTS=0
-
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -17,9 +13,12 @@ RUN set -eux; \
       # cups: 提供 import cups（稳定，不用 pip 编译 pycups）
       python3-cups \
       libcups2 \
+      cups-client \
       # python-magic: 运行时需要 libmagic + magic database
       libmagic1 \
       file \
+      # pdf2image: 需要 pdftoppm/pdftocairo
+      poppler-utils \
       # weasyprint 运行依赖（尽量精简）
       libcairo2 \
       libpango-1.0-0 \
@@ -29,17 +28,10 @@ RUN set -eux; \
       libffi8 \
       libjpeg62-turbo \
       zlib1g \
-      poppler-utils \
       shared-mime-info \
-      # 字体：只装一个相对基础的，避免字体包过大
+      # 基础字体
       fonts-dejavu-core \
     ; \
-    if [ "$WITH_POPPLER" = "1" ]; then \
-      apt-get install -y --no-install-recommends poppler-utils; \
-    fi; \
-    if [ "$WITH_EXTRA_FONTS" = "1" ]; then \
-      apt-get install -y --no-install-recommends fonts-liberation; \
-    fi; \
     rm -rf /var/lib/apt/lists/*
 
 # 让 /usr/local 的 Python 能加载 Debian dist-packages（python3-cups 在这里）
@@ -54,8 +46,10 @@ PY
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install -r /tmp/requirements.txt && rm -f /tmp/requirements.txt
 
-# 构建期断言，避免上线才发现缺 cups/magic
-RUN python -c "import cups, magic; print('cups/magic ok')"
+# 构建期校验，避免上线才炸
+RUN python -c "import cups, magic; print('cups/magic ok')" \
+ && command -v pdftoppm >/dev/null \
+ && command -v pdftocairo >/dev/null
 
 WORKDIR /app
 COPY backend/ ./backend/
@@ -63,12 +57,14 @@ COPY frontend/templates/ ./backend/templates/
 COPY frontend/static/ ./frontend/static/
 COPY run.py .
 
-RUN mkdir -p /app/uploads /app/logs /app/uploads/previews && chmod 777 /app/uploads /app/logs /app/uploads/previews
+RUN mkdir -p /app/uploads /app/logs /app/uploads/previews \
+ && chmod 777 /app/uploads /app/logs /app/uploads/previews
 
 RUN mkdir -p /etc/supervisor/conf.d
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
 EXPOSE 5000
+
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/health')" || exit 1
 

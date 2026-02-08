@@ -1,4 +1,4 @@
-name: Build and Push Docker Image
+name: Build and Push Docker Image (Optimized, Prefer ARM64)
 
 on:
   push:
@@ -41,130 +41,94 @@ concurrency:
 
 env:
   REGISTRY: registry.cn-hangzhou.aliyuncs.com
-  # 阿里云命名空间 + 仓库名组合
   IMAGE_NAMESPACE: ${{ secrets.ALIYUN_IMAGE_NAMESPACE }}
-  # secrets 在 PR(fork) 场景可能为空，给个兜底
-  IMAGE_NAME:  'remoteprint'
-  GHCR_REGISTRY: ghcr.io
-  GITHUB_REPOSITORY: ${{ github.repository }}
+  IMAGE_NAME: remoteprint
+  CACHE_SCOPE: ${{ github.repository }}-remoteprint
 
 jobs:
-  build:
+  docker:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    outputs:
-      platforms_list: ${{ steps.platforms.outputs.platforms_list }}
-      tag_name: ${{ steps.tag.outputs.tag_name }}
-      tag_from_input: ${{ steps.tag.outputs.tag_from_input }}
-      build_date: ${{ steps.builddate.outputs.build_date }}
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Set build date
         id: builddate
-        run: |
-          echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        shell: bash
+        run: echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
 
       - name: Determine tag name
         id: tag
+        shell: bash
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.tag }}" != "" ]]; then
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.tag }}" ]]; then
             echo "tag_name=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
-            echo "tag_from_input=true" >> "$GITHUB_OUTPUT"
           elif [[ "${{ github.ref_type }}" == "tag" ]]; then
             echo "tag_name=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
-            echo "tag_from_input=false" >> "$GITHUB_OUTPUT"
           else
             echo "tag_name=sha-${{ github.sha }}" >> "$GITHUB_OUTPUT"
-            echo "tag_from_input=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Determine platforms
+      - name: Determine platforms (prefer arm64)
         id: platforms
+        shell: bash
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             p="${{ github.event.inputs.platforms }}"
             if [[ "$p" == "all" ]]; then
-              PLATFORMS="linux/amd64,linux/arm64"
-            elif [[ "$p" == "arm64" ]]; then
-              PLATFORMS="linux/arm64"
-            else
+              PLATFORMS="linux/arm64,linux/amd64"
+            elif [[ "$p" == "amd64" ]]; then
               PLATFORMS="linux/amd64"
+            else
+              PLATFORMS="linux/arm64"
             fi
+          elif [[ "${{ github.ref_type }}" == "tag" ]]; then
+            # 发版 tag 默认双架构（arm64 优先顺序）
+            PLATFORMS="linux/arm64,linux/amd64"
           else
-            PLATFORMS="linux/amd64,linux/arm64"
+            # PR / push 分支默认只构建 arm64
+            PLATFORMS="linux/arm64"
           fi
           echo "platforms_list=$PLATFORMS" >> "$GITHUB_OUTPUT"
 
-      - name: Extract metadata for Docker
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_NAME }}
-            ${{ env.GHCR_REGISTRY }}/${{ env.GITHUB_REPOSITORY }}
-          flavor: |
-            latest=auto
-          tags: |
-            type=sha,format=short
-            type=ref,event=branch
-            type=ref,event=tag
-            type=raw,value=${{ steps.tag.outputs.tag_name }},enable=true
+      - name: Decide whether to push
+        id: willpush
+        shell: bash
+        run: |
+          WILL_PUSH="false"
 
-      - name: Build (no push)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          platforms: ${{ steps.platforms.outputs.platforms_list }}
-          push: false
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ env.IMAGE_NAMESPACE }}-${{ env.IMAGE_NAME }}
-          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAMESPACE }}-${{ env.IMAGE_NAME }}
-          build-args: |
-            BUILD_DATE=${{ steps.builddate.outputs.build_date }}
-            VERSION=${{ steps.tag.outputs.tag_name }}
+          # workflow_dispatch：用户勾选 push_registry 且非 dry_run
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.push_registry }}" == "true" && "${{ github.event.inputs.dry_run }}" != "true" ]]; then
+            WILL_PUSH="true"
+          fi
 
-  push-to-aliyun:
-    needs: build
-    if: >-
-      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))) ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.push_registry == 'true' && github.event.inputs.dry_run != 'true')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
+          # push main/master 或 tag：默认推送
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            if [[ "${{ github.ref }}" == "refs/heads/main" || "${{ github.ref }}" == "refs/heads/master" || "${{ github.ref }}" == refs/tags/* ]]; then
+              WILL_PUSH="true"
+            fi
+          fi
 
-      - name: Set up QEMU
+          echo "will_push=$WILL_PUSH" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU (only if needed)
+        if: contains(steps.platforms.outputs.platforms_list, 'arm64') && runner.arch != 'ARM64'
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      
-      - name: Debug image name
-        run: |
-          echo "REGISTRY=${{ env.REGISTRY }}"
-          echo "NAMESPACE=${{ env.IMAGE_NAMESPACE }}"
-          echo "IMAGE_NAME=${{ env.IMAGE_NAME }}"
-          echo "FULL=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_NAME }}"  
 
-      - name: Log in to Aliyun Container Registry
+      - name: Log in to Aliyun Container Registry (only when pushing)
+        if: steps.willpush.outputs.will_push == 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
           password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
 
-      - name: Extract metadata for Aliyun
+      - name: Extract metadata for Docker
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -175,134 +139,63 @@ jobs:
             type=sha,format=short
             type=ref,event=branch
             type=ref,event=tag
-            type=raw,value=${{ needs.build.outputs.tag_name }},enable=true
+            type=raw,value=${{ steps.tag.outputs.tag_name }},enable=true
 
-      - name: Build and push to Aliyun
+      - name: Build (and optionally push)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
-          platforms: ${{ needs.build.outputs.platforms_list }}
-          push: true
+          platforms: ${{ steps.platforms.outputs.platforms_list }}
+          push: ${{ steps.willpush.outputs.will_push == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ env.IMAGE_NAMESPACE }}-${{ env.IMAGE_NAME }}-aliyun
-          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAMESPACE }}-${{ env.IMAGE_NAME }}-aliyun
+          cache-from: type=gha,scope=${{ env.CACHE_SCOPE }}
+          cache-to: type=gha,mode=max,scope=${{ env.CACHE_SCOPE }}
+          provenance: false
+          sbom: false
           build-args: |
-            BUILD_DATE=${{ needs.build.outputs.build_date }}
-            VERSION=${{ needs.build.outputs.tag_name }}
+            BUILD_DATE=${{ steps.builddate.outputs.build_date }}
+            VERSION=${{ steps.tag.outputs.tag_name }}
 
-  export-offline:
-    needs: build
-    if: >-
-      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.generate_offline == 'true' && github.event.inputs.dry_run != 'true')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      # 关键：离线 tar 不能对多平台一次 load；这里逐平台构建+save
-      - name: Build and export offline tar(s)
-        id: offline
+      # 离线包：优先走“pull已推送镜像 -> docker save”（最快）
+      - name: Export offline tar(s) (fast path: pull then save)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.generate_offline == 'true' && github.event.inputs.dry_run != 'true' && steps.willpush.outputs.will_push == 'true'
+        shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
 
-          PLATFORMS="${{ needs.build.outputs.platforms_list }}"
+          TAG="${{ steps.tag.outputs.tag_name }}"
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_NAME }}:${TAG}"
+
+          PLATFORMS="${{ steps.platforms.outputs.platforms_list }}"
           IFS=',' read -ra arr <<< "$PLATFORMS"
 
-          for p in "${arr[@]}"; do
-            arch="${p#linux/}"   # amd64/arm64
-            tag="offline:${{ needs.build.outputs.tag_name }}-$arch"
+          # arm64 优先
+          ordered=()
+          for x in "linux/arm64" "linux/amd64"; do
+            for p in "${arr[@]}"; do
+              if [[ "$p" == "$x" ]]; then ordered+=("$p"); fi
+            done
+          done
 
-            echo "Building $p -> $tag"
-            docker buildx build \
-              --platform "$p" \
-              --load \
-              -t "$tag" \
-              --build-arg BUILD_DATE="${{ needs.build.outputs.build_date }}" \
-              --build-arg VERSION="${{ needs.build.outputs.tag_name }}" \
-              -f Dockerfile .
+          for p in "${ordered[@]}"; do
+            arch="${p#linux/}"
+            echo "Pulling $IMAGE ($p)"
+            docker pull --platform "$p" "$IMAGE"
 
             out="dist/print-service-${arch}.tar"
-            docker save "$tag" -o "$out"
+            docker save "$IMAGE" -o "$out"
             sha256sum "$out" > "${out}.sha256"
           done
 
           ls -lah dist
 
       - name: Upload offline tar artifacts
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.generate_offline == 'true' && github.event.inputs.dry_run != 'true' && steps.willpush.outputs.will_push == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: offline-${{ needs.build.outputs.tag_name }}
+          name: offline-${{ steps.tag.outputs.tag_name }}
           path: dist/*
           compression-level: 1
-
-  create-release:
-    needs: [build, push-to-aliyun, export-offline]
-    if: >-
-      always() &&
-      (startsWith(github.ref, 'refs/tags/') ||
-       (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run != 'true'))
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Decide release version
-        id: ver
-        run: |
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=${{ needs.build.outputs.tag_name }}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Download offline artifacts (if any)
-        if: needs.export-offline.result == 'success'
-        uses: actions/download-artifact@v4
-        with:
-          name: offline-${{ needs.build.outputs.tag_name }}
-          path: release/
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.ver.outputs.version }}
-          name: Release ${{ steps.ver.outputs.version }}
-          body: |
-            ## Printer Server ${{ steps.ver.outputs.version }}
-
-            ### Docker Images
-            - Aliyun: `${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}`
-
-            ### Offline Packages
-            - `print-service-amd64.tar` / `print-service-arm64.tar`
-            - `*.sha256`
-          files: release/**
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  notify:
-    needs: [build, push-to-aliyun, export-offline]
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - run: |
-          echo "Platforms: ${{ needs.build.outputs.platforms_list }}"
-          echo "Tag: ${{ needs.build.outputs.tag_name }}"
-          echo "Push-to-aliyun: ${{ needs.push-to-aliyun.result }}"
-          echo "Offline: ${{ needs.export-offline.result }}"
